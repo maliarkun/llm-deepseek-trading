@@ -17,6 +17,13 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 
 BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / ".env"
+
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH, override=True)
+else:
+    load_dotenv(override=True)
+
 DEFAULT_DATA_DIR = BASE_DIR / "data"
 DATA_DIR = Path(os.getenv("TRADEBOT_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -25,7 +32,6 @@ STATE_CSV = DATA_DIR / "portfolio_state.csv"
 TRADES_CSV = DATA_DIR / "trade_history.csv"
 DECISIONS_CSV = DATA_DIR / "ai_decisions.csv"
 MESSAGES_CSV = DATA_DIR / "ai_messages.csv"
-ENV_PATH = BASE_DIR / ".env"
 DEFAULT_RISK_FREE_RATE = 0.0
 DEFAULT_SNAPSHOT_SECONDS = 180.0
 
@@ -37,11 +43,6 @@ COIN_TO_SYMBOL: Dict[str, str] = {
     "DOGE": "DOGEUSDT",
     "BNB": "BNBUSDT",
 }
-
-if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
-else:
-    load_dotenv()
 
 BN_API_KEY = os.getenv("BN_API_KEY", "")
 BN_SECRET = os.getenv("BN_SECRET", "")
@@ -100,6 +101,11 @@ def get_portfolio_state() -> pd.DataFrame:
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "timestamp" in df.columns:
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Europe/Istanbul").dt.tz_localize(None)
+        except Exception as e:
+            logging.warning("Error converting state timestamp: %s", e)
     df.sort_values("timestamp", inplace=True)
     df.set_index("timestamp", inplace=True)
     return df
@@ -110,6 +116,11 @@ def get_trades() -> pd.DataFrame:
     df = load_csv(TRADES_CSV, parse_dates=["timestamp"])
     if df.empty:
         return df
+    if "timestamp" in df.columns:
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Europe/Istanbul").dt.tz_localize(None)
+        except Exception as e:
+            logging.warning("Error converting trades timestamp: %s", e)
     df.sort_values("timestamp", inplace=True, ascending=False)
     numeric_cols = [
         "quantity",
@@ -132,6 +143,11 @@ def get_ai_decisions() -> pd.DataFrame:
     df = load_csv(DECISIONS_CSV, parse_dates=["timestamp"])
     if df.empty:
         return df
+    if "timestamp" in df.columns:
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Europe/Istanbul").dt.tz_localize(None)
+        except Exception as e:
+            logging.warning("Error converting decisions timestamp: %s", e)
     df.sort_values("timestamp", inplace=True, ascending=False)
     return df
 
@@ -141,6 +157,11 @@ def get_ai_messages() -> pd.DataFrame:
     df = load_csv(MESSAGES_CSV, parse_dates=["timestamp"])
     if df.empty:
         return df
+    if "timestamp" in df.columns:
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Europe/Istanbul").dt.tz_localize(None)
+        except Exception as e:
+            logging.warning("Error converting messages timestamp: %s", e)
     df.sort_values("timestamp", inplace=True, ascending=False)
     return df
 

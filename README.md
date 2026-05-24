@@ -105,7 +105,7 @@ By default the Sortino ratio assumes a 0% risk-free rate. Override it by definin
 - Docker 24+ (any engine capable of building Linux/AMD64 images)
 - A `.env` file with the required API credentials:
   - `BN_API_KEY` / `BN_SECRET` for Binance access
-  - `OPENROUTER_API_KEY` for DeepSeek requests
+  - `DEEPSEEK_API_KEY` for DeepSeek requests
   - Optional: `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for push notifications
   - Optional: Hyperliquid live-trading variables (see below)
 

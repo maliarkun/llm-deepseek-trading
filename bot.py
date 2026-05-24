@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DeepSeek Multi-Asset Paper Trading Bot
-Uses Binance API for market data and OpenRouter API for DeepSeek Chat V3.1 trading decisions
+Uses Binance API for market data and DeepSeek API for DeepSeek Chat V3.1 trading decisions
 """
 from __future__ import annotations
 
@@ -105,7 +105,7 @@ def _parse_thinking_env(value: Optional[str]) -> Optional[Any]:
 # ───────────────────────── CONFIG ─────────────────────────
 API_KEY = os.getenv("BN_API_KEY", "")
 API_SECRET = os.getenv("BN_SECRET", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", "")
@@ -129,14 +129,21 @@ HYPERLIQUID_CAPITAL = _parse_float_env(
 START_CAPITAL = HYPERLIQUID_CAPITAL if HYPERLIQUID_LIVE_TRADING else PAPER_START_CAPITAL
 
 # Trading symbols to monitor
-SYMBOLS = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "BTCUSDT", "DOGEUSDT", "BNBUSDT"]
+# Read from .env TRADEBOT_TICKERS (default includes POL)
+TICKER_STR = os.getenv("TRADEBOT_TICKERS", "BTC,ETH,SOL,XRP,DOGE,BNB,POL")
+TICKERS_LIST = [t.strip().upper() for t in TICKER_STR.split(",")]
+
+# Map tickers to trading symbols (add USDT suffix)
+SYMBOLS = [f"{ticker}USDT" for ticker in TICKERS_LIST]
+
 SYMBOL_TO_COIN = {
     "ETHUSDT": "ETH",
     "SOLUSDT": "SOL", 
     "XRPUSDT": "XRP",
     "BTCUSDT": "BTC",
     "DOGEUSDT": "DOGE",
-    "BNBUSDT": "BNB"
+    "BNBUSDT": "BNB",
+    "POLUSDT": "POL"
 }
 COIN_TO_SYMBOL = {coin: symbol for symbol, coin in SYMBOL_TO_COIN.items()}
 
@@ -264,7 +271,7 @@ def _load_trade_interval(default: str = DEFAULT_INTERVAL) -> str:
 INTERVAL = _load_trade_interval()
 CHECK_INTERVAL = _INTERVAL_TO_SECONDS[INTERVAL]
 DEFAULT_RISK_FREE_RATE = 0.0  # Annualized baseline for Sortino ratio calculations
-DEFAULT_LLM_MODEL = "deepseek/deepseek-chat-v3.1"
+DEFAULT_LLM_MODEL = "deepseek-chat"
 
 
 def _load_llm_model_name() -> str:
@@ -354,19 +361,19 @@ RISK_FREE_RATE = _resolve_risk_free_rate()
 if not dotenv_loaded:
     logging.warning(f"No .env file found at {DOTENV_PATH}; falling back to system environment variables.")
 
-if OPENROUTER_API_KEY:
+if DEEPSEEK_API_KEY:
     masked_key = (
-        OPENROUTER_API_KEY
-        if len(OPENROUTER_API_KEY) <= 12
-        else f"{OPENROUTER_API_KEY[:6]}...{OPENROUTER_API_KEY[-4:]}"
+        DEEPSEEK_API_KEY
+        if len(DEEPSEEK_API_KEY) <= 12
+        else f"{DEEPSEEK_API_KEY[:6]}...{DEEPSEEK_API_KEY[-4:]}"
     )
     logging.info(
-        "OpenRouter API key detected: %s (length %d)",
+        "DeepSeek API key detected: %s (length %d)",
         masked_key,
-        len(OPENROUTER_API_KEY),
+        len(DEEPSEEK_API_KEY),
     )
 else:
-    logging.error("OPENROUTER_API_KEY not found; please check your .env file.")
+    logging.error("DEEPSEEK_API_KEY not found; please check your .env file.")
 
 client: Optional[Client] = None
 
@@ -1496,8 +1503,68 @@ def _recover_partial_decisions(json_str: str) -> Optional[Tuple[Dict[str, Any], 
     return recovered, missing
 
 
+def clean_request_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Clean the request payload to ensure compatibility with the official DeepSeek API,
+    removing any OpenRouter or unsupported parameters."""
+    allowed_keys = {
+        "model",
+        "messages",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "stream",
+        "response_format",
+        "stop",
+        "presence_penalty",
+        "frequency_penalty",
+        "user",
+        "thinking",
+        "reasoning_effort"
+    }
+    
+    cleaned = {k: v for k, v in payload.items() if k in allowed_keys}
+    model = cleaned.get("model", "")
+    
+    # deepseek-reasoner does not support temperature, top_p, presence_penalty, frequency_penalty, or thinking toggles
+    if model == "deepseek-reasoner":
+        for key in ["temperature", "top_p", "presence_penalty", "frequency_penalty"]:
+            cleaned.pop(key, None)
+        cleaned.pop("thinking", None)
+        cleaned.pop("reasoning_effort", None)
+        
+    # deepseek-chat (V3) does not support thinking or reasoning_effort parameters
+    elif model == "deepseek-chat":
+        cleaned.pop("thinking", None)
+        cleaned.pop("reasoning_effort", None)
+        
+    # V4 models (deepseek-v4-pro, deepseek-v4-flash)
+    elif "deepseek-v4" in model:
+        if "thinking" in cleaned:
+            val = cleaned["thinking"]
+            if isinstance(val, bool):
+                cleaned["thinking"] = {"type": "enabled" if val else "disabled"}
+            elif isinstance(val, dict):
+                if "type" not in val:
+                    val["type"] = "enabled"
+                cleaned["thinking"] = val
+            elif isinstance(val, (int, float)) or (isinstance(val, str) and val.isdigit()):
+                cleaned["thinking"] = {"type": "enabled"}
+            elif isinstance(val, str):
+                if val.lower() in ("enabled", "true", "on"):
+                    cleaned["thinking"] = {"type": "enabled"}
+                elif val.lower() in ("disabled", "false", "off"):
+                    cleaned["thinking"] = {"type": "disabled"}
+                else:
+                    cleaned["thinking"] = {"type": "enabled"}
+            else:
+                cleaned.pop("thinking", None)
+                
+    return cleaned
+
+
 def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
-    """Call OpenRouter API with DeepSeek Chat V3.1."""
+    """Call official DeepSeek API with deepseek-chat."""
     try:
         request_metadata: Dict[str, Any] = {
             "model": LLM_MODEL_NAME,
@@ -1506,6 +1573,9 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         }
         if LLM_THINKING_PARAM is not None:
             request_metadata["thinking"] = LLM_THINKING_PARAM
+
+        # Clean the metadata to only log valid parameters
+        request_metadata = clean_request_payload(request_metadata)
 
         log_ai_message(
             direction="sent",
@@ -1538,21 +1608,28 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         if LLM_THINKING_PARAM is not None:
             request_payload["thinking"] = LLM_THINKING_PARAM
 
+        # Clean the payload to remove any unsupported or OpenRouter specific parameters
+        cleaned_payload = clean_request_payload(request_payload)
+
+        logging.info(
+            "Sending API request to DeepSeek. Endpoint: https://api.deepseek.com/chat/completions | Model: %s",
+            cleaned_payload.get("model")
+        )
+        logging.debug("Request payload parameters: %s", list(cleaned_payload.keys()))
+
         response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
+            url="https://api.deepseek.com/chat/completions",
             headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/crypto-trading-bot",
-                "X-Title": "DeepSeek Trading Bot",
             },
-            json=request_payload,
+            json=cleaned_payload,
             timeout=30
         )
 
         if response.status_code != 200:
             notify_error(
-                f"OpenRouter API error: {response.status_code}",
+                f"DeepSeek API error: {response.status_code}",
                 metadata={
                     "status_code": response.status_code,
                     "response_text": response.text,
@@ -2413,8 +2490,8 @@ def main() -> None:
     load_equity_history()
     load_state()
     
-    if not OPENROUTER_API_KEY:
-        logging.error("OPENROUTER_API_KEY not found in .env file")
+    if not DEEPSEEK_API_KEY:
+        logging.error("DEEPSEEK_API_KEY not found in .env file")
         return
     
     logging.info(f"Starting capital: ${START_CAPITAL:.2f}")

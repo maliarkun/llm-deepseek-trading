@@ -32,4 +32,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run your application
-CMD ["python", "bot.py"]
+CMD ["sh", "-c", "python bot.py & streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0"]
