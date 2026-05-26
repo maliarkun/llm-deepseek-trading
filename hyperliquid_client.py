@@ -529,8 +529,8 @@ class HyperliquidTradingClient:
             )
             return {"status": "error", "message": "Invalid trigger price after normalization."}
 
-        # For market trigger orders, apply 5% slippage to the limit price to ensure execution
-        slippage = 0.05
+        # For market trigger orders, apply 1% slippage to the limit price to ensure execution
+        slippage = 0.01
         if is_buy:
             execution_limit = trigger_price * (1.0 + slippage)
         else:
