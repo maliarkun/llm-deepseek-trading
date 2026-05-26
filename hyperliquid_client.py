@@ -529,12 +529,23 @@ class HyperliquidTradingClient:
             )
             return {"status": "error", "message": "Invalid trigger price after normalization."}
 
+        # For market trigger orders, apply 5% slippage to the limit price to ensure execution
+        slippage = 0.05
+        if is_buy:
+            execution_limit = trigger_price * (1.0 + slippage)
+        else:
+            execution_limit = trigger_price * (1.0 - slippage)
+            
+        normalized_execution = self._normalize_price(coin, execution_limit, rounding="ceil" if is_buy else "floor")
+        if normalized_execution <= 0:
+            normalized_execution = normalized_trigger
+
         try:
             response = exchange_any.order(
                 name=coin,
                 is_buy=is_buy,
                 sz=size,
-                limit_px=normalized_trigger,
+                limit_px=normalized_execution,
                 order_type={
                     "trigger": {
                         "isMarket": True,
