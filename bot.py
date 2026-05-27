@@ -2033,9 +2033,29 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     if stop_distance == 0:
         logging.warning(f"{coin}: Invalid stop loss, skipping")
         return
+        
+    # Security: Reject extremely tight stop losses (less than 0.5%)
+    stop_distance_pct = stop_distance / current_price
+    if stop_distance_pct < 0.005:
+        logging.warning(
+            f"{coin}: Stop loss too tight ({stop_distance_pct*100:.2f}%). "
+            f"Must be at least 0.5% to avoid fee burn. Skipping entry."
+        )
+        return
     
     quantity = risk_usd / stop_distance
     position_value = quantity * current_price
+    
+    # Security: Cap position value to max 10x leverage equivalent of available balance
+    max_position_value = balance * 10
+    if position_value > max_position_value:
+        logging.warning(
+            f"{coin}: Capping position size! Calculated value ${position_value:.2f} "
+            f"exceeds limit ${max_position_value:.2f}."
+        )
+        position_value = max_position_value
+        quantity = position_value / current_price
+        
     margin_required = position_value / leverage if leverage else position_value
     
     liquidity = str(decision.get('liquidity', 'taker')).lower()
@@ -2417,6 +2437,27 @@ def process_ai_decisions(decisions: Dict[str, Any]) -> None:
                 reason_text = existing_reason or "No justification provided."
                 if not existing_reason:
                     pos["last_justification"] = reason_text
+                    
+            # Trailing Stop mechanism: Update SL/TP if provided by the AI during a HOLD
+            new_sl = decision.get("stop_loss")
+            new_tp = decision.get("profit_target")
+            
+            if new_sl is not None:
+                try:
+                    new_sl_val = float(new_sl)
+                    if new_sl_val > 0:
+                        pos["stop_loss"] = new_sl_val
+                except (ValueError, TypeError):
+                    pass
+                    
+            if new_tp is not None:
+                try:
+                    new_tp_val = float(new_tp)
+                    if new_tp_val > 0:
+                        pos["profit_target"] = new_tp_val
+                except (ValueError, TypeError):
+                    pass
+                    
             try:
                 quantity = float(pos.get("quantity", 0.0))
             except (TypeError, ValueError):
@@ -2532,17 +2573,17 @@ def check_stop_loss_take_profit() -> None:
         if pos["side"] == "long":
             if candle_low is not None and candle_low <= pos["stop_loss"]:
                 exit_reason = "Stop loss hit"
-                exit_price = pos["stop_loss"]
+                exit_price = pos["stop_loss"] * 0.999 # 0.1% slippage
             elif candle_high is not None and candle_high >= pos["profit_target"]:
                 exit_reason = "Take profit hit"
-                exit_price = pos["profit_target"]
+                exit_price = pos["profit_target"] * 0.9995 # 0.05% slippage on target
         else:  # short
             if candle_high is not None and candle_high >= pos["stop_loss"]:
                 exit_reason = "Stop loss hit"
-                exit_price = pos["stop_loss"]
+                exit_price = pos["stop_loss"] * 1.001
             elif candle_low is not None and candle_low <= pos["profit_target"]:
                 exit_reason = "Take profit hit"
-                exit_price = pos["profit_target"]
+                exit_price = pos["profit_target"] * 1.0005
 
         if exit_reason:
             execute_close(coin, {"justification": exit_reason}, exit_price)
