@@ -565,9 +565,9 @@ def render_ai_tab(decisions_df: pd.DataFrame, messages_df: pd.DataFrame) -> None
 def main() -> None:
     st.set_page_config(page_title="DeepSeek Bot Monitor", layout="wide")
     st.title("DeepSeek Trading Bot Monitor")
-    st.caption(
+    st.markdown(
         "Source code available at "
-        "[github.com/tot-gromov/llm-deepseek-trading](https://github.com/tot-gromov/llm-deepseek-trading)"
+        "[github.com/maliarkun/llm-deepseek-trading](https://github.com/maliarkun/llm-deepseek-trading)"
     )
 
     if st.button("🔄 Refresh Data"):
