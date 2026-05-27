@@ -2665,8 +2665,8 @@ def main() -> None:
             print(line)
             record_iteration_message(line)
 
-            if current_iteration_messages:
-                send_telegram_message("\n".join(current_iteration_messages), parse_mode=None)
+            # if current_iteration_messages:
+            #     send_telegram_message("\n".join(current_iteration_messages), parse_mode=None)
             
             # Log state
             log_portfolio_state()
