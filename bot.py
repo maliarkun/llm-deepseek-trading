@@ -1462,14 +1462,38 @@ def format_prompt_for_deepseek() -> str:
         }
         prompt_lines.append(f"{coin} position data: {json.dumps(position_payload)}")
 
-    sharpe_ratio = 0.0
-    prompt_lines.append(f"Sharpe Ratio: {fmt(sharpe_ratio, 3)}")
+    sharpe_ratio = calculate_sharpe_ratio(equity_history, CHECK_INTERVAL, RISK_FREE_RATE)
+    prompt_lines.append(f"Sharpe Ratio: {fmt(sharpe_ratio, 3) if sharpe_ratio is not None else 'N/A (need more data)'}")
+
+    # --- Recent Trade History (last 10 closed trades) ---
+    prompt_lines.append("\nRECENT TRADE HISTORY (last 10 closed trades):")
+    try:
+        if TRADES_CSV.exists():
+            df_trades = pd.read_csv(TRADES_CSV)
+            closed_trades = df_trades[df_trades['action'] == 'CLOSE'].tail(10)
+            if closed_trades.empty:
+                prompt_lines.append("  No closed trades yet.")
+            else:
+                for _, row in closed_trades.iterrows():
+                    pnl_val = float(row.get('pnl', 0))
+                    result = '✅ WIN' if pnl_val > 0 else '❌ LOSS' if pnl_val < 0 else '➖ BE'
+                    prompt_lines.append(
+                        f"  {result} | {row.get('coin','?')} {row.get('side','?').upper()} "
+                        f"@ ${float(row.get('price', 0)):.2f} | PnL: ${pnl_val:.2f} | "
+                        f"{str(row.get('reason', ''))[:80]}"
+                    )
+        else:
+            prompt_lines.append("  No trade history file found.")
+    except Exception as exc:
+        logging.debug("Could not load trade history for prompt: %s", exc)
+        prompt_lines.append("  Trade history unavailable.")
+    prompt_lines.append("-" * 80)
 
     prompt_lines.append(
         """
 INSTRUCTIONS:
 For each coin, provide a trading decision in JSON format. You can either:
-1. "hold" - Keep current position (if you have one)
+1. "hold" - Keep current position (if you have one). You may update stop_loss and profit_target to trail your stops.
 2. "entry" - Open a new position (if you don't have one)
 3. "close" - Close current position
 
@@ -1490,7 +1514,14 @@ Return ONLY a valid JSON object with this structure:
 }
 
 IMPORTANT:
-- Only suggest entries if you see strong opportunities
+- Only suggest entries if you see strong opportunities with confidence >= 0.6
+- Entries with confidence below 0.6 will be rejected by the system
+- Maximum leverage allowed is 20x
+- Maximum 4 simultaneous positions allowed
+- Stop loss must be at least 0.5% away from current price
+- When holding a profitable position, consider updating stop_loss closer to current price to lock in profits (trailing stop)
+- Use SuperTrend direction as your primary trend filter
+- Learn from your recent trade history above - avoid repeating losing patterns
 - Use proper risk management
 - Provide clear invalidation conditions
 - Return ONLY valid JSON, no other text
@@ -1691,7 +1722,7 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
                 "Content-Type": "application/json",
             },
             json=cleaned_payload,
-            timeout=30
+            timeout=60
         )
 
         if response.status_code != 200:
@@ -1932,12 +1963,69 @@ def calculate_sortino_ratio(
         return None
     return float(sortino)
 
+def calculate_sharpe_ratio(
+    equity_values: Iterable[float],
+    period_seconds: float,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> Optional[float]:
+    """
+    Compute the annualized Sharpe ratio from equity snapshots.
+    """
+    values = [float(v) for v in equity_values if isinstance(v, (int, float, np.floating)) and np.isfinite(v)]
+    if len(values) < 2:
+        return None
+
+    returns = np.diff(values) / np.array(values[:-1], dtype=float)
+    returns = returns[np.isfinite(returns)]
+    if returns.size == 0:
+        return None
+
+    period_seconds = float(period_seconds) if period_seconds and period_seconds > 0 else CHECK_INTERVAL
+    periods_per_year = (365 * 24 * 60 * 60) / period_seconds
+    if not np.isfinite(periods_per_year) or periods_per_year <= 0:
+        return None
+
+    per_period_rf = risk_free_rate / periods_per_year
+    excess_return = returns.mean() - per_period_rf
+    if not np.isfinite(excess_return):
+        return None
+
+    std_dev = np.std(returns, ddof=1)
+    if std_dev <= 0 or not np.isfinite(std_dev):
+        return None
+
+    sharpe = (excess_return / std_dev) * np.sqrt(periods_per_year)
+    if not np.isfinite(sharpe):
+        return None
+    return float(sharpe)
+
 def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> None:
     """Execute entry trade."""
     global balance
     
     if coin in positions:
         logging.warning(f"{coin}: Already have position, skipping entry")
+        return
+    
+    # Max 4 concurrent positions
+    MAX_CONCURRENT_POSITIONS = 4
+    if len(positions) >= MAX_CONCURRENT_POSITIONS:
+        logging.warning(
+            f"{coin}: Max concurrent positions reached ({MAX_CONCURRENT_POSITIONS}). Skipping entry."
+        )
+        return
+    
+    # Confidence filter: reject low-confidence entries
+    confidence_raw = decision.get('confidence', 0)
+    try:
+        confidence_val = float(confidence_raw)
+    except (TypeError, ValueError):
+        confidence_val = 0.0
+    MIN_CONFIDENCE = 0.6
+    if confidence_val < MIN_CONFIDENCE:
+        logging.warning(
+            f"{coin}: Confidence too low ({confidence_val:.2f} < {MIN_CONFIDENCE}). Skipping entry."
+        )
         return
     
     side = str(decision.get('side', 'long')).lower()
@@ -1969,6 +2057,13 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     except (TypeError, ValueError):
         logging.warning(f"{coin}: Invalid leverage '%s'; defaulting to 1x", leverage_raw)
         leverage = 1.0
+    # Cap leverage at 20x
+    MAX_LEVERAGE = 20.0
+    if leverage > MAX_LEVERAGE:
+        logging.warning(
+            f"{coin}: Capping leverage from {leverage}x to {MAX_LEVERAGE}x."
+        )
+        leverage = MAX_LEVERAGE
     leverage_display = format_leverage_display(leverage)
 
     risk_usd_raw = decision.get('risk_usd', balance * 0.01)
