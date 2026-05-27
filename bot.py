@@ -178,6 +178,10 @@ Maintain a Written Trading Plan
 - Know entry, exit, and profit targets before executing.
 - Consistently follow the plan to keep emotions in check.
 
+Use SuperTrend for Trend and Trailing Stops
+- SuperTrend Direction (UP/DOWN) is a strong trend indicator. Align your trades with it.
+- When holding a profitable position, use the SuperTrend value as a dynamic trailing stop-loss.
+
 Control Leverage and Position Sizing
 - Use leverage responsibly; ensure even a worst-case loss stays within the 1-2% risk cap.
 - Proper sizing is central to risk management.
@@ -858,6 +862,10 @@ def add_indicator_columns(
     for period in rsi_periods:
         result[f"rsi{period}"] = calculate_rsi_series(close, period)
 
+    st_df = calculate_supertrend_series(df, period=10, multiplier=3.0)
+    result["supertrend"] = st_df["supertrend"]
+    result["supertrend_dir"] = st_df["supertrend_dir"]
+
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -885,6 +893,62 @@ def calculate_atr_series(df: pd.DataFrame, period: int) -> pd.Series:
     true_range = tr_components.max(axis=1)
     alpha = 1 / period
     return true_range.ewm(alpha=alpha, adjust=False).mean()
+
+def calculate_supertrend_series(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """Calculate SuperTrend indicator."""
+    atr = calculate_atr_series(df, period)
+    hl2 = (df['high'] + df['low']) / 2
+    
+    basic_ub = hl2 + (multiplier * atr)
+    basic_lb = hl2 - (multiplier * atr)
+    
+    final_ub = np.zeros(len(df))
+    final_lb = np.zeros(len(df))
+    supertrend = np.zeros(len(df))
+    direction = np.ones(len(df)) # 1 for up, -1 for down
+    
+    close = df['close'].values
+    basic_ub_v = basic_ub.values
+    basic_lb_v = basic_lb.values
+    
+    for i in range(len(df)):
+        if i == 0 or np.isnan(basic_ub_v[i]):
+            final_ub[i] = basic_ub_v[i] if not np.isnan(basic_ub_v[i]) else 0
+            final_lb[i] = basic_lb_v[i] if not np.isnan(basic_lb_v[i]) else 0
+            supertrend[i] = final_ub[i]
+            direction[i] = 1
+            continue
+            
+        # Final Upper Band
+        if basic_ub_v[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub_v[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        # Final Lower Band
+        if basic_lb_v[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb_v[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+            
+        # SuperTrend Direction
+        if supertrend[i-1] == final_ub[i-1] and close[i] <= final_ub[i]:
+            direction[i] = -1
+            supertrend[i] = final_ub[i]
+        elif supertrend[i-1] == final_ub[i-1] and close[i] > final_ub[i]:
+            direction[i] = 1
+            supertrend[i] = final_lb[i]
+        elif supertrend[i-1] == final_lb[i-1] and close[i] >= final_lb[i]:
+            direction[i] = 1
+            supertrend[i] = final_lb[i]
+        elif supertrend[i-1] == final_lb[i-1] and close[i] < final_lb[i]:
+            direction[i] = -1
+            supertrend[i] = final_ub[i]
+            
+    return pd.DataFrame({
+        'supertrend': supertrend,
+        'supertrend_dir': direction
+    }, index=df.index)
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.Series:
@@ -1149,6 +1213,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
                 "macd_signal": float(df_trend["macd_signal"].iloc[-1]),
                 "macd_histogram": float(df_trend["macd_histogram"].iloc[-1]),
                 "atr": float(df_trend["atr"].iloc[-1]),
+                "supertrend": float(df_trend["supertrend"].iloc[-1]),
+                "supertrend_dir": "UP" if float(df_trend["supertrend_dir"].iloc[-1]) > 0 else "DOWN",
                 "current_volume": float(df_trend["volume"].iloc[-1]),
                 "average_volume": float(df_trend["volume"].mean()),
                 "series": {
@@ -1268,6 +1334,7 @@ def format_prompt_for_deepseek() -> str:
         )
         prompt_lines.append(f"    RSI14: {fmt(trend['rsi14'], 2)}")
         prompt_lines.append(f"    ATR (for stop placement): {fmt(trend['atr'], 3)}")
+        prompt_lines.append(f"    SuperTrend (10,3): {fmt(trend['supertrend'], 3)} ({trend['supertrend_dir']})")
         prompt_lines.append(
             f"    Volume: Current {fmt(trend['current_volume'], 2)}, Average {fmt(trend['average_volume'], 2)}"
         )
