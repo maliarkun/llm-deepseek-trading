@@ -457,6 +457,7 @@ iteration_counter: int = 0
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 current_iteration_messages: List[str] = []
 equity_history: List[float] = []
+supertrend_state: Dict[str, Dict[str, Any]] = {}  # Tracks SuperTrend per coin
 
 # CSV files
 STATE_CSV = DATA_DIR / "portfolio_state.csv"
@@ -2029,6 +2030,21 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         return
     
     side = str(decision.get('side', 'long')).lower()
+    
+    # SuperTrend direction filter: block entries against the trend
+    st = supertrend_state.get(coin)
+    if st:
+        if side == 'long' and st['direction'] == 'DOWN':
+            logging.warning(
+                f"{coin}: LONG entry BLOCKED - SuperTrend is DOWN. Cannot go long against the trend."
+            )
+            return
+        elif side == 'short' and st['direction'] == 'UP':
+            logging.warning(
+                f"{coin}: SHORT entry BLOCKED - SuperTrend is UP. Cannot go short against the trend."
+            )
+            return
+    
     raw_reason = str(decision.get('justification', '')).strip()
     reason_text_compact = " ".join(raw_reason.split()) if raw_reason else ""
     if reason_text_compact:
@@ -2683,6 +2699,74 @@ def check_stop_loss_take_profit() -> None:
         if exit_reason:
             execute_close(coin, {"justification": exit_reason}, exit_price)
 
+def fetch_supertrend_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetch 4H data and return current SuperTrend value and direction for a symbol."""
+    binance_client = get_binance_client()
+    if not binance_client:
+        return None
+    try:
+        klines = binance_client.get_klines(symbol=symbol, interval="4h", limit=100)
+        df = pd.DataFrame(
+            klines,
+            columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "close_time", "quote_volume", "trades", "taker_base",
+                "taker_quote", "ignore",
+            ],
+        )
+        if df.empty:
+            return None
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        st_df = calculate_supertrend_series(df, period=10, multiplier=3.0)
+        return {
+            "supertrend": float(st_df["supertrend"].iloc[-1]),
+            "direction": "UP" if float(st_df["supertrend_dir"].iloc[-1]) > 0 else "DOWN",
+            "price": float(df["close"].iloc[-1]),
+        }
+    except Exception as exc:
+        logging.error("SuperTrend fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+def check_supertrend_signals() -> None:
+    """Mechanical SuperTrend engine: auto-close positions that go against the trend."""
+    for symbol in SYMBOLS:
+        coin = SYMBOL_TO_COIN[symbol]
+        st_data = fetch_supertrend_for_symbol(symbol)
+        if not st_data:
+            continue
+
+        direction = st_data["direction"]
+        price = st_data["price"]
+        st_value = st_data["supertrend"]
+
+        # Store current state for entry filtering
+        supertrend_state[coin] = st_data
+
+        # If we have an open position, check if SuperTrend is against us
+        if coin in positions:
+            pos = positions[coin]
+            if pos["side"] == "long" and direction == "DOWN":
+                line = f"{Fore.RED}[SUPERTREND] {coin}: Trend flipped DOWN ↘ Auto-closing LONG @ ${price:.4f} (ST: ${st_value:.4f})"
+                print(line)
+                record_iteration_message(line)
+                logging.info("%s: SuperTrend flipped DOWN. Auto-closing LONG position.", coin)
+                execute_close(coin, {"justification": f"SuperTrend flipped DOWN (ST: ${st_value:.2f}) - mechanical trend reversal exit"}, price)
+            elif pos["side"] == "short" and direction == "UP":
+                line = f"{Fore.RED}[SUPERTREND] {coin}: Trend flipped UP ↗ Auto-closing SHORT @ ${price:.4f} (ST: ${st_value:.4f})"
+                print(line)
+                record_iteration_message(line)
+                logging.info("%s: SuperTrend flipped UP. Auto-closing SHORT position.", coin)
+                execute_close(coin, {"justification": f"SuperTrend flipped UP (ST: ${st_value:.2f}) - mechanical trend reversal exit"}, price)
+        else:
+            # No position - just log the current SuperTrend state
+            arrow = "↗" if direction == "UP" else "↘"
+            line = f"{Fore.CYAN}[SUPERTREND] {coin}: {direction} {arrow} (ST: ${st_value:.4f}, Price: ${price:.4f})"
+            print(line)
+            record_iteration_message(line)
+
+
 # ─────────────────────────── MAIN ──────────────────────────
 
 def main() -> None:
@@ -2738,7 +2822,10 @@ def main() -> None:
             print(line)
             record_iteration_message(line)
             
-            # Check stop loss / take profit first
+            # SuperTrend mechanical engine: auto-close against-trend positions
+            check_supertrend_signals()
+            
+            # Check stop loss / take profit
             check_stop_loss_take_profit()
             
             # Get AI decisions
