@@ -1973,12 +1973,12 @@ def calculate_sharpe_ratio(
     Compute the annualized Sharpe ratio from equity snapshots.
     """
     values = [float(v) for v in equity_values if isinstance(v, (int, float, np.floating)) and np.isfinite(v)]
-    if len(values) < 2:
+    if len(values) < 3:  # Need at least 3 values for 2 returns to calculate std dev with ddof=1
         return None
 
     returns = np.diff(values) / np.array(values[:-1], dtype=float)
     returns = returns[np.isfinite(returns)]
-    if returns.size == 0:
+    if returns.size < 2:
         return None
 
     period_seconds = float(period_seconds) if period_seconds and period_seconds > 0 else CHECK_INTERVAL
