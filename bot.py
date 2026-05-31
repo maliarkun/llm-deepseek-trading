@@ -1525,6 +1525,8 @@ IMPORTANT:
 - Learn from your recent trade history above - avoid repeating losing patterns
 - Use proper risk management
 - Provide clear invalidation conditions
+- CRITICAL RULE: If a position is already open and the trend is strong (SuperTrend UP), DO NOT close it simply because the RSI is overbought. Strong trends can stay overbought for a long time. Instead of closing, use trailing stops (update stop_loss) to protect profits.
+- ENTRY RULE: Güçlü trendlerde (SuperTrend flip) RSI overbought durumu, trend güçlü olduğunun kanıtıdır. Geri çekilme beklemek fırsatı kaçırmak demektir. Do not hesitate to enter or hold just because RSI is > 70.
 - Return ONLY valid JSON, no other text
 """.strip()
     )
@@ -2741,8 +2743,13 @@ def check_supertrend_signals() -> None:
         price = st_data["price"]
         st_value = st_data["supertrend"]
 
+        # Get previous state to detect flips
+        prev_st_data = supertrend_state.get(coin)
+        prev_direction = prev_st_data["direction"] if prev_st_data else direction
+
         # Store current state for entry filtering
         supertrend_state[coin] = st_data
+        supertrend_state[coin]["previous_direction"] = prev_direction
 
         # If we have an open position, check if SuperTrend is against us
         if coin in positions:
@@ -2760,11 +2767,30 @@ def check_supertrend_signals() -> None:
                 logging.info("%s: SuperTrend flipped UP. Auto-closing SHORT position.", coin)
                 execute_close(coin, {"justification": f"SuperTrend flipped UP (ST: ${st_value:.2f}) - mechanical trend reversal exit"}, price)
         else:
-            # No position - just log the current SuperTrend state
-            arrow = "↗" if direction == "UP" else "↘"
-            line = f"{Fore.CYAN}[SUPERTREND] {coin}: {direction} {arrow} (ST: ${st_value:.4f}, Price: ${price:.4f})"
-            print(line)
-            record_iteration_message(line)
+            # Check for DOWN -> UP flip to trigger mechanical entry
+            if prev_st_data and prev_direction == "DOWN" and direction == "UP":
+                line = f"{Fore.GREEN}[SUPERTREND] {coin}: Trend flipped UP ↗ Triggering MECHANICAL ENTRY @ ${price:.4f}"
+                print(line)
+                record_iteration_message(line)
+                logging.info("%s: SuperTrend flipped UP. Triggering mechanical LONG entry.", coin)
+                
+                decision = {
+                    "signal": "entry",
+                    "side": "long",
+                    "leverage": 10,
+                    "risk_usd": balance * 0.01,
+                    "stop_loss": st_value,
+                    "profit_target": price + (price - st_value) * 2,
+                    "confidence": 0.99,
+                    "justification": f"Mechanical Entry: 4H SuperTrend flipped UP at ${price:.2f}."
+                }
+                execute_entry(coin, decision, price)
+            else:
+                # No position - just log the current SuperTrend state
+                arrow = "↗" if direction == "UP" else "↘"
+                line = f"{Fore.CYAN}[SUPERTREND] {coin}: {direction} {arrow} (ST: ${st_value:.4f}, Price: ${price:.4f})"
+                print(line)
+                record_iteration_message(line)
 
 
 # ─────────────────────────── MAIN ──────────────────────────
