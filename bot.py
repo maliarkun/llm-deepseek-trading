@@ -130,7 +130,7 @@ START_CAPITAL = HYPERLIQUID_CAPITAL if HYPERLIQUID_LIVE_TRADING else PAPER_START
 
 # Trading symbols to monitor
 # Read from .env TRADEBOT_TICKERS (default includes POL)
-TICKER_STR = os.getenv("TRADEBOT_TICKERS", "POL,BNB,BTC,ETH,XRP,PAXG")
+TICKER_STR = os.getenv("TRADEBOT_TICKERS", "POL,BNB,BTC,ETH,XRP,XAU")
 TICKERS_LIST = [t.strip().upper() for t in TICKER_STR.split(",")]
 
 # Map tickers to trading symbols (add USDT suffix)
@@ -970,7 +970,7 @@ def fetch_market_data(symbol: str) -> Optional[Dict[str, Any]]:
 
     try:
         # Get recent klines
-        klines = binance_client.get_klines(symbol=symbol, interval=INTERVAL, limit=50)
+        klines = binance_client.futures_klines(symbol=symbol, interval=INTERVAL, limit=50)
 
         df = pd.DataFrame(
             klines,
@@ -1048,7 +1048,7 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        execution_klines = binance_client.get_klines(symbol=symbol, interval=INTERVAL, limit=200)
+        execution_klines = binance_client.futures_klines(symbol=symbol, interval=INTERVAL, limit=200)
         df_execution = pd.DataFrame(
             execution_klines,
             columns=[
@@ -1080,7 +1080,7 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
             macd_params=(MACD_FAST, MACD_SLOW, MACD_SIGNAL),
         )
 
-        structure_klines = binance_client.get_klines(symbol=symbol, interval="1h", limit=100)
+        structure_klines = binance_client.futures_klines(symbol=symbol, interval="1h", limit=100)
         df_structure = pd.DataFrame(
             structure_klines,
             columns=[
@@ -1113,7 +1113,7 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
         df_structure["volume_sma"] = df_structure["volume"].rolling(window=20).mean()
         df_structure["volume_ratio"] = df_structure["volume"] / df_structure["volume_sma"].replace(0, np.nan)
 
-        trend_klines = binance_client.get_klines(symbol=symbol, interval="4h", limit=100)
+        trend_klines = binance_client.futures_klines(symbol=symbol, interval="4h", limit=100)
         df_trend = pd.DataFrame(
             trend_klines,
             columns=[
@@ -2761,7 +2761,7 @@ def fetch_supertrend_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     if not binance_client:
         return None
     try:
-        klines = binance_client.get_klines(symbol=symbol, interval="4h", limit=100)
+        klines = binance_client.futures_klines(symbol=symbol, interval="4h", limit=100)
         df = pd.DataFrame(
             klines,
             columns=[
