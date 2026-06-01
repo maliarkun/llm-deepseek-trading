@@ -130,21 +130,13 @@ START_CAPITAL = HYPERLIQUID_CAPITAL if HYPERLIQUID_LIVE_TRADING else PAPER_START
 
 # Trading symbols to monitor
 # Read from .env TRADEBOT_TICKERS (default includes POL)
-TICKER_STR = os.getenv("TRADEBOT_TICKERS", "BTC,ETH,SOL,XRP,DOGE,BNB,POL")
+TICKER_STR = os.getenv("TRADEBOT_TICKERS", "POL,BNB,BTC,ETH,XRP,PAXG")
 TICKERS_LIST = [t.strip().upper() for t in TICKER_STR.split(",")]
 
 # Map tickers to trading symbols (add USDT suffix)
 SYMBOLS = [f"{ticker}USDT" for ticker in TICKERS_LIST]
 
-SYMBOL_TO_COIN = {
-    "ETHUSDT": "ETH",
-    "SOLUSDT": "SOL", 
-    "XRPUSDT": "XRP",
-    "BTCUSDT": "BTC",
-    "DOGEUSDT": "DOGE",
-    "BNBUSDT": "BNB",
-    "POLUSDT": "POL"
-}
+SYMBOL_TO_COIN = {f"{ticker}USDT": ticker for ticker in TICKERS_LIST}
 COIN_TO_SYMBOL = {coin: symbol for symbol, coin in SYMBOL_TO_COIN.items()}
 
 DEFAULT_TRADING_RULES_PROMPT = """
