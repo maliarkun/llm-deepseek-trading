@@ -458,6 +458,7 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 current_iteration_messages: List[str] = []
 equity_history: List[float] = []
 supertrend_state: Dict[str, Dict[str, Any]] = {}  # Tracks SuperTrend per coin
+stop_cooldown: Dict[str, str] = {}  # coin -> 'long'|'short': blocked direction after stop hit
 
 # CSV files
 STATE_CSV = DATA_DIR / "portfolio_state.csv"
@@ -1525,8 +1526,12 @@ IMPORTANT:
 - Learn from your recent trade history above - avoid repeating losing patterns
 - Use proper risk management
 - Provide clear invalidation conditions
+- If the signal is 'hold' or 'close', set the 'side' parameter to null.
+- Calculate the 'quantity' based on the risk_usd and the distance to your stop_loss. Assume a hypothetical balance if none is provided, or strictly use the provided Wallet Balance.
 - CRITICAL RULE: If a position is already open and the trend is strong (SuperTrend UP), DO NOT close it simply because the RSI is overbought. Strong trends can stay overbought for a long time. Instead of closing, use trailing stops (update stop_loss) to protect profits.
-- ENTRY RULE: Güçlü trendlerde (SuperTrend flip) RSI overbought durumu, trend güçlü olduğunun kanıtıdır. Geri çekilme beklemek fırsatı kaçırmak demektir. Do not hesitate to enter or hold just because RSI is > 70.
+- ENTRY RULE: In strong trends (e.g., SuperTrend flip), an overbought RSI (>70) is evidence of trend strength. Do not wait for a pullback. Execute the entry, but strictly manage risk with appropriate leverage and stop-loss.
+- STOP LOSS RULE: Always set stop loss at least 1.5x the 4H ATR away from entry price to avoid being stopped out by normal price wicks. Do not use swing lows that are less than 1.5x ATR from entry.
+- OBJECTIVITY RULE: Do NOT use recent losses as a reason to avoid a clear trend setup. Each trade must be evaluated independently on current market structure and signals, not on past performance.
 - Return ONLY valid JSON, no other text
 """.strip()
     )
@@ -2032,7 +2037,19 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         return
     
     side = str(decision.get('side', 'long')).lower()
-    
+
+    # ── "One trend, one trade" cooldown check ───────────────────────────────
+    # After a stop loss on a given side, do not re-enter the same direction
+    # until the SuperTrend makes a fresh flip (new trend = clean slate).
+    blocked_side = stop_cooldown.get(coin)
+    if blocked_side and blocked_side == side:
+        logging.warning(
+            f"{coin}: Entry BLOCKED by cooldown. Stop was hit on a {side.upper()} inside this "
+            f"SuperTrend cycle. Wait for a fresh SuperTrend flip before re-entering."
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────────
+
     # SuperTrend direction filter: block entries against the trend
     st = supertrend_state.get(coin)
     if st:
@@ -2141,6 +2158,36 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
             )
             return
     
+    # ── ATR-based minimum stop floor ──────────────────────────────────────
+    # Stop loss must be at least 1.5x the 4H ATR away from entry price.
+    # This prevents stop-hunt wicks from shaking us out of valid positions.
+    atr_value = 0.0
+    coin_data = supertrend_state.get(coin)
+    if coin_data:
+        atr_value = coin_data.get("atr", 0.0)
+
+    if atr_value > 0:
+        min_stop_distance = atr_value * 1.5
+        if side == 'long':
+            atr_based_sl = current_price - min_stop_distance
+            if stop_loss_price > atr_based_sl:
+                logging.warning(
+                    f"{coin}: Stop loss ${stop_loss_price:.4f} is too tight (< ATR*1.5 = ${min_stop_distance:.4f}). "
+                    f"Adjusting to ATR-based floor: ${atr_based_sl:.4f}"
+                )
+                stop_loss_price = atr_based_sl
+                decision['stop_loss'] = stop_loss_price
+        elif side == 'short':
+            atr_based_sl = current_price + min_stop_distance
+            if stop_loss_price < atr_based_sl:
+                logging.warning(
+                    f"{coin}: Stop loss ${stop_loss_price:.4f} is too tight (< ATR*1.5 = ${min_stop_distance:.4f}). "
+                    f"Adjusting to ATR-based floor: ${atr_based_sl:.4f}"
+                )
+                stop_loss_price = atr_based_sl
+                decision['stop_loss'] = stop_loss_price
+    # ───────────────────────────────────────────────────────────────────────
+
     # Calculate position size based on risk
     stop_distance = abs(current_price - stop_loss_price)
     if stop_distance == 0:
@@ -2699,6 +2746,16 @@ def check_stop_loss_take_profit() -> None:
                 exit_price = pos["profit_target"] * 1.0005
 
         if exit_reason:
+            # ── Mark stop-loss cooldown ───────────────────────────────────────────
+            if "Stop loss" in exit_reason:
+                stopped_side = pos.get("side", "long")
+                stop_cooldown[coin] = stopped_side
+                logging.info(
+                    "%s: Stop loss hit on %s. Cooldown activated — "
+                    "no re-entry on %s until next SuperTrend flip.",
+                    coin, stopped_side.upper(), stopped_side.upper()
+                )
+            # ─────────────────────────────────────────────────────────────────────
             execute_close(coin, {"justification": exit_reason}, exit_price)
 
 def fetch_supertrend_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
@@ -2721,10 +2778,12 @@ def fetch_supertrend_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
         st_df = calculate_supertrend_series(df, period=10, multiplier=3.0)
+        atr_series = calculate_atr_series(df, 14)
         return {
             "supertrend": float(st_df["supertrend"].iloc[-1]),
             "direction": "UP" if float(st_df["supertrend_dir"].iloc[-1]) > 0 else "DOWN",
             "price": float(df["close"].iloc[-1]),
+            "atr": float(atr_series.iloc[-1]),
         }
     except Exception as exc:
         logging.error("SuperTrend fetch failed for %s: %s", symbol, exc)
@@ -2769,6 +2828,11 @@ def check_supertrend_signals() -> None:
         else:
             # Check for DOWN -> UP flip to trigger mechanical entry
             if prev_st_data and prev_direction == "DOWN" and direction == "UP":
+                # Fresh flip: clear any long-side cooldown for this coin
+                if stop_cooldown.get(coin) == "long":
+                    logging.info("%s: SuperTrend flipped UP → long cooldown cleared.", coin)
+                    stop_cooldown.pop(coin, None)
+
                 line = f"{Fore.GREEN}[SUPERTREND] {coin}: Trend flipped UP ↗ Triggering MECHANICAL ENTRY @ ${price:.4f}"
                 print(line)
                 record_iteration_message(line)
