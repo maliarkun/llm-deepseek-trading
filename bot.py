@@ -2777,13 +2777,18 @@ def fetch_supertrend_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
             return None
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
-        st_df = calculate_supertrend_series(df, period=10, multiplier=3.0)
+        # multiplier 3.5 → fewer but more reliable signals than 3.0
+        st_df = calculate_supertrend_series(df, period=10, multiplier=3.5)
         atr_series = calculate_atr_series(df, 14)
+        # Use iloc[-2] (last CLOSED candle) for signal direction and ST value.
+        # iloc[-1] is the still-open current candle; its intra-candle wicks
+        # can produce false flip signals that reverse before the candle closes.
+        # We still use iloc[-1] close price for live execution (entry/exit).
         return {
-            "supertrend": float(st_df["supertrend"].iloc[-1]),
-            "direction": "UP" if float(st_df["supertrend_dir"].iloc[-1]) > 0 else "DOWN",
-            "price": float(df["close"].iloc[-1]),
-            "atr": float(atr_series.iloc[-1]),
+            "supertrend": float(st_df["supertrend"].iloc[-2]),
+            "direction": "UP" if float(st_df["supertrend_dir"].iloc[-2]) > 0 else "DOWN",
+            "price": float(df["close"].iloc[-1]),   # live price for execution
+            "atr": float(atr_series.iloc[-2]),       # ATR from closed candle too
         }
     except Exception as exc:
         logging.error("SuperTrend fetch failed for %s: %s", symbol, exc)
