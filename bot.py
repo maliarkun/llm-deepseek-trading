@@ -334,6 +334,11 @@ TAKER_FEE_RATE = 0.000275    # 0.0275%
 
 # ───────────────────────────────────────────────────────────
 
+import time
+os.environ['TZ'] = 'Europe/Istanbul'
+if hasattr(time, 'tzset'):
+    time.tzset()
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
